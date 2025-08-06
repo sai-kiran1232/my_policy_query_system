@@ -1,5 +1,8 @@
 fastapi
 uvicorn
-sentence-transformers==2.2.2
-faiss-cpu
 pydantic
+faiss-cpu
+pdfminer.six
+langchain-community
+spacy
+sentence-transformers==2.2.2
