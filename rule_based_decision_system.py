@@ -1,24 +1,37 @@
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU-only mode (disable GPU)
+
 import json
 import re
+from functools import lru_cache
 from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from query_understanding import parse_query
 
-# Load FAISS index and metadata
-faiss_index = FAISS.load_local(
-    "faiss_policy_clauses_index",
-    HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2"),
-    allow_dangerous_deserialization=True
-)
+# Lazy load embeddings only when needed to avoid high memory usage at startup
+@lru_cache(maxsize=1)
+def get_embeddings():
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
 
-with open("policy_clauses_metadata.json", "r") as f:
-    clause_metadata = json.load(f)
+# Lazy load FAISS index
+@lru_cache(maxsize=1)
+def get_faiss_index():
+    return FAISS.load_local(
+        "faiss_policy_clauses_index",
+        get_embeddings(),
+        allow_dangerous_deserialization=True
+    )
+
+# Load metadata only once
+@lru_cache(maxsize=1)
+def get_metadata():
+    with open("policy_clauses_metadata.json", "r") as f:
+        return json.load(f)
 
 def clean_text(text):
     return re.sub(r"\s+", " ", text.strip().lower())
 
 def summarize_clause(question, clause_text):
-    # Custom rule-based summarization for known question types
     q = question.lower()
 
     if "grace period" in q:
@@ -30,17 +43,18 @@ def summarize_clause(question, clause_text):
     elif "ayush" in q:
         return "AYUSH treatments are covered up to the sum insured, provided treatment is taken in an AYUSH hospital."
 
-    # Fallback: return the first full sentence from the clause
     return clause_text.strip().split(".")[0] + "."
 
 def process_query(query_text):
     structured = parse_query(query_text)
     print("Structured Query:", structured)
 
+    faiss_index = get_faiss_index()
+    clause_metadata = get_metadata()
+
     retrieved_docs = faiss_index.similarity_search(query_text, k=10)
 
     best_clause = None
-    best_score = -1
 
     for doc in retrieved_docs:
         doc_text_clean = clean_text(doc.page_content)
@@ -55,5 +69,4 @@ def process_query(query_text):
     if not best_clause:
         best_clause = retrieved_docs[0].page_content if retrieved_docs else "Sorry, no relevant information found."
 
-    # Summarize the clause into a clean answer
     return summarize_clause(query_text, best_clause)
