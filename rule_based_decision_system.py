@@ -1,34 +1,33 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Disable GPU use
-
 import json
+import pickle
 import re
 from functools import lru_cache
-from sentence_transformers import SentenceTransformer, util
-import faiss
-import pickle
 from query_understanding import parse_query
+import faiss
+from sentence_transformers import SentenceTransformer
 
-# ✅ Smallest model + direct use (no LangChain overhead)
-@lru_cache(maxsize=1)
-def get_model():
-    return SentenceTransformer("paraphrase-MiniLM-L3-v2")
+# Force CPU-only
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
-# ✅ Load FAISS index manually
 @lru_cache(maxsize=1)
-def load_faiss_index():
-    with open("faiss_policy_clauses_index/faiss_index.pkl", "rb") as f:
+def get_faiss_index():
+    with open("faiss_index.pkl", "rb") as f:
         return pickle.load(f)
 
 @lru_cache(maxsize=1)
-def load_texts():
-    with open("faiss_policy_clauses_index/texts.pkl", "rb") as f:
+def get_texts():
+    with open("texts.pkl", "rb") as f:
         return pickle.load(f)
 
 @lru_cache(maxsize=1)
-def load_metadata():
+def get_metadata():
     with open("policy_clauses_metadata.json", "r") as f:
         return json.load(f)
+
+@lru_cache(maxsize=1)
+def get_model():
+    return SentenceTransformer("sentence-transformers/paraphrase-MiniLM-L3-v2")
 
 def clean_text(text):
     return re.sub(r"\s+", " ", text.strip().lower())
@@ -48,31 +47,32 @@ def summarize_clause(question, clause_text):
     return clause_text.strip().split(".")[0] + "."
 
 def process_query(query_text):
-    try:
-        structured = parse_query(query_text)
-        model = get_model()
-        index = load_faiss_index()
-        texts = load_texts()
-        metadata = load_metadata()
+    structured = parse_query(query_text)
+    print("Structured Query:", structured)
 
-        query_emb = model.encode(query_text, convert_to_tensor=False)
-        D, I = index.search([query_emb], k=3)
+    index = get_faiss_index()
+    texts = get_texts()
+    metadata = get_metadata()
+    model = get_model()
 
-        best_clause = None
-        for idx in I[0]:
-            doc_text = texts[idx]
-            doc_text_clean = clean_text(doc_text)
-            for clause in metadata:
-                clause_text_clean = clean_text(clause["text"])
-                if doc_text_clean in clause_text_clean or clause_text_clean in doc_text_clean:
-                    best_clause = clause["text"]
-                    break
-            if best_clause:
+    query_embedding = model.encode([query_text])
+    _, I = index.search(query_embedding, k=10)
+
+    best_clause = None
+
+    for idx in I[0]:
+        doc_text_clean = clean_text(texts[idx])
+        for clause in metadata:
+            clause_text_clean = clean_text(clause["text"])
+            if doc_text_clean in clause_text_clean or clause_text_clean in doc_text_clean:
+                best_clause = clause["text"]
                 break
+        if best_clause:
+            break
 
-        if not best_clause:
-            best_clause = texts[I[0][0]] if I[0] else "Sorry, no relevant information found."
+    if not best_clause and len(I[0]) > 0:
+        best_clause = texts[I[0][0]]
+    elif not best_clause:
+        best_clause = "Sorry, no relevant information found."
 
-        return summarize_clause(query_text, best_clause)
-    except Exception as e:
-        return "An error occurred while processing your request."
+    return summarize_clause(query_text, best_clause)
