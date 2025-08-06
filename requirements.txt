@@ -1,7 +1,8 @@
 fastapi
 uvicorn
+pydantic
 langchain
 sentence-transformers
 faiss-cpu
-spacy
 pdfminer.six
+langchain-community
