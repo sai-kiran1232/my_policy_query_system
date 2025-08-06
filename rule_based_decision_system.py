@@ -1,30 +1,32 @@
 import os
-os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU-only mode (disable GPU)
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Disable GPU use
 
 import json
 import re
 from functools import lru_cache
-from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from sentence_transformers import SentenceTransformer, util
+import faiss
+import pickle
 from query_understanding import parse_query
 
-# Lazy load embeddings only when needed to avoid high memory usage at startup
+# ✅ Smallest model + direct use (no LangChain overhead)
 @lru_cache(maxsize=1)
-def get_embeddings():
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-MiniLM-L3-v2")
+def get_model():
+    return SentenceTransformer("paraphrase-MiniLM-L3-v2")
 
-# Lazy load FAISS index
+# ✅ Load FAISS index manually
 @lru_cache(maxsize=1)
-def get_faiss_index():
-    return FAISS.load_local(
-        "faiss_policy_clauses_index",
-        get_embeddings(),
-        allow_dangerous_deserialization=True
-    )
+def load_faiss_index():
+    with open("faiss_policy_clauses_index/faiss_index.pkl", "rb") as f:
+        return pickle.load(f)
 
-# Load metadata only once
 @lru_cache(maxsize=1)
-def get_metadata():
+def load_texts():
+    with open("faiss_policy_clauses_index/texts.pkl", "rb") as f:
+        return pickle.load(f)
+
+@lru_cache(maxsize=1)
+def load_metadata():
     with open("policy_clauses_metadata.json", "r") as f:
         return json.load(f)
 
@@ -46,27 +48,31 @@ def summarize_clause(question, clause_text):
     return clause_text.strip().split(".")[0] + "."
 
 def process_query(query_text):
-    structured = parse_query(query_text)
-    print("Structured Query:", structured)
+    try:
+        structured = parse_query(query_text)
+        model = get_model()
+        index = load_faiss_index()
+        texts = load_texts()
+        metadata = load_metadata()
 
-    faiss_index = get_faiss_index()
-    clause_metadata = get_metadata()
+        query_emb = model.encode(query_text, convert_to_tensor=False)
+        D, I = index.search([query_emb], k=3)
 
-    retrieved_docs = faiss_index.similarity_search(query_text, k=10)
-
-    best_clause = None
-
-    for doc in retrieved_docs:
-        doc_text_clean = clean_text(doc.page_content)
-        for clause in clause_metadata:
-            clause_text_clean = clean_text(clause["text"])
-            if doc_text_clean in clause_text_clean or clause_text_clean in doc_text_clean:
-                best_clause = clause["text"]
+        best_clause = None
+        for idx in I[0]:
+            doc_text = texts[idx]
+            doc_text_clean = clean_text(doc_text)
+            for clause in metadata:
+                clause_text_clean = clean_text(clause["text"])
+                if doc_text_clean in clause_text_clean or clause_text_clean in doc_text_clean:
+                    best_clause = clause["text"]
+                    break
+            if best_clause:
                 break
-        if best_clause:
-            break
 
-    if not best_clause:
-        best_clause = retrieved_docs[0].page_content if retrieved_docs else "Sorry, no relevant information found."
+        if not best_clause:
+            best_clause = texts[I[0][0]] if I[0] else "Sorry, no relevant information found."
 
-    return summarize_clause(query_text, best_clause)
+        return summarize_clause(query_text, best_clause)
+    except Exception as e:
+        return "An error occurred while processing your request."
