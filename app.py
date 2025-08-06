@@ -1,3 +1,6 @@
+@app.get("/")
+def home():
+    return {"message": "Policy Query System is running 🚀"}
 import json
 import re
 from functools import lru_cache
